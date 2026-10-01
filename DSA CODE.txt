@@ -1,0 +1,685 @@
+import java.util.*;
+
+/**
+ * Project Scheduling System Using DAG and CPM        DSA-3 (25CS2103E)
+ *
+ * Core pipeline : Input -> DAG -> cycle check (DFS) -> Topological Sort (Kahn) -> CPM
+ *
+ * Course-outcome topics used
+ *   CO1  Evaluate problem class & select strategy
+ *          - substring search               -> KMP chosen (linear time)
+ *          - NP-hard scheduling             -> exact bitmask DP for small n, greedy heuristic for large n
+ *   CO2  Linear-time string algorithms / suffix structures
+ *          - KMP                            -> keyword search over task names
+ *          - Suffix Array + LCP array       -> detect similar / duplicate task names
+ *   CO4  Max-flow (Edmonds-Karp) + min-cut check -> assign tasks to workers
+ *   CO5  NP-hard scheduling -> Graham (2-1/m) approximation, lower-bound ratio
+ *   CO6  Las Vegas quick-select, Monte Carlo simulation, parallel reduce/prefix sum (work-span)
+ *   CO3  Advanced DP patterns
+ *          - Bitmask DP / DP on subsets     -> best single-worker order + count of valid orders
+ *          - DP on subsets (subset-sum)     -> split workload between 2 teams
+ *          - DP on a DAG (tree-DP idea)     -> CPM forward/backward passes
+ */
+public class ProjectScheduler {
+
+    // =====================================================================
+    //  Task and DAG
+    // =====================================================================
+    static class Task {
+        String id, name;
+        int duration;
+        List<String> preds = new ArrayList<>();
+        int es, ef, ls, lf, slack;
+        Task(String id, String name, int duration) { this.id = id; this.name = name; this.duration = duration; }
+        boolean isCritical() { return slack == 0; }
+    }
+
+    static class DAG {
+        Map<String, Task> tasks = new LinkedHashMap<>();       // hashing: id -> task
+        Map<String, List<String>> adj = new HashMap<>();       // adjacency list
+        Map<String, Integer> indegree = new HashMap<>();
+
+        void addTask(Task t) { tasks.put(t.id, t); adj.put(t.id, new ArrayList<>()); indegree.put(t.id, 0); }
+
+        void addEdge(String from, String to) { adj.get(from).add(to); indegree.merge(to, 1, Integer::sum); }
+
+        // DFS cycle detection (0 = unvisited, 1 = on stack, 2 = finished)
+        List<String> findCycle() {
+            Map<String, Integer> color = new HashMap<>();
+            Deque<String> stack = new ArrayDeque<>();
+            for (String id : tasks.keySet())
+                if (color.getOrDefault(id, 0) == 0) {
+                    List<String> c = dfs(id, color, stack);
+                    if (c != null) return c;
+                }
+            return null;
+        }
+
+        private List<String> dfs(String u, Map<String, Integer> color, Deque<String> stack) {
+            color.put(u, 1); stack.push(u);
+            for (String v : adj.get(u)) {
+                if (color.getOrDefault(v, 0) == 1) {
+                    List<String> cycle = new ArrayList<>();
+                    for (String s : stack) { cycle.add(s); if (s.equals(v)) break; }
+                    Collections.reverse(cycle); cycle.add(v);
+                    return cycle;
+                }
+                if (color.getOrDefault(v, 0) == 0) { List<String> c = dfs(v, color, stack); if (c != null) return c; }
+            }
+            stack.pop(); color.put(u, 2);
+            return null;
+        }
+
+        // Kahn's algorithm; the min-heap picks the smallest ID among ready tasks
+        List<String> topologicalSort() {
+            Map<String, Integer> deg = new HashMap<>(indegree);
+            PriorityQueue<String> ready = new PriorityQueue<>();
+            for (String id : tasks.keySet()) if (deg.get(id) == 0) ready.add(id);
+            List<String> order = new ArrayList<>();
+            while (!ready.isEmpty()) {
+                String u = ready.poll();
+                order.add(u);
+                for (String v : adj.get(u)) { deg.put(v, deg.get(v) - 1); if (deg.get(v) == 0) ready.add(v); }
+            }
+            return order;
+        }
+    }
+
+    // =====================================================================
+    //  CPM  (DP over the topological order)
+    // =====================================================================
+    static int runCPM(DAG g, List<String> order) {
+        int end = 0;
+        for (String id : order) {                                   // forward pass
+            Task t = g.tasks.get(id);
+            t.es = 0;
+            for (String p : t.preds) t.es = Math.max(t.es, g.tasks.get(p).ef);
+            t.ef = t.es + t.duration;
+            end = Math.max(end, t.ef);
+        }
+        for (int i = order.size() - 1; i >= 0; i--) {               // backward pass
+            Task t = g.tasks.get(order.get(i));
+            t.lf = end;
+            for (String s : g.adj.get(t.id)) t.lf = Math.min(t.lf, g.tasks.get(s).ls);
+            t.ls = t.lf - t.duration;
+            t.slack = t.ls - t.es;
+        }
+        return end;
+    }
+
+    static void collectPaths(DAG g, String u, Deque<String> cur, List<String> out) {
+        cur.addLast(u);
+        boolean extended = false;
+        for (String v : g.adj.get(u)) {
+            Task tv = g.tasks.get(v);
+            if (tv.isCritical() && tv.es == g.tasks.get(u).ef) { collectPaths(g, v, cur, out); extended = true; }
+        }
+        if (!extended) out.add(String.join(" -> ", cur));
+        cur.removeLast();
+    }
+
+    static void printSchedule(DAG g, List<String> order, int total) {
+        System.out.println("\n=== EXECUTION ORDER (Topological Sort) ===");
+        System.out.println(String.join(" -> ", order));
+
+        System.out.println("\n=== CPM SCHEDULE ===");
+        System.out.printf("%-6s %-22s %4s %4s %4s %4s %4s %6s  %s%n", "ID", "Task", "Dur", "ES", "EF", "LS", "LF", "Slack", "Critical");
+        for (String id : order) {
+            Task t = g.tasks.get(id);
+            System.out.printf("%-6s %-22s %4d %4d %4d %4d %4d %6d  %s%n", t.id, t.name, t.duration, t.es, t.ef, t.ls, t.lf, t.slack,
+                    t.isCritical() ? "YES *" : "no");
+        }
+
+        System.out.println("\n=== CRITICAL PATH(S) ===");
+        List<String> paths = new ArrayList<>();
+        for (String id : order) { Task t = g.tasks.get(id); if (t.isCritical() && t.es == 0) collectPaths(g, id, new ArrayDeque<>(), paths); }
+        for (String p : paths) System.out.println(p);
+        System.out.println("\nMinimum project duration: " + total + " days");
+
+        System.out.println("\n=== TIMELINE (# = critical, - = has slack) ===");
+        for (String id : order) {
+            Task t = g.tasks.get(id);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < t.es; i++) sb.append(' ');
+            for (int i = 0; i < t.duration; i++) sb.append(t.isCritical() ? '#' : '-');
+            System.out.printf("%-6s|%s%n", t.id, sb);
+        }
+    }
+
+    // =====================================================================
+    //  CO2 : String algorithms
+    // =====================================================================
+    static class StringAlgos {
+
+        // ---- KMP: prefix (failure) function + linear-time search, O(n + m) ----
+        static int[] prefixFunction(String p) {
+            int[] pi = new int[p.length()];
+            for (int i = 1, k = 0; i < p.length(); i++) {
+                while (k > 0 && p.charAt(i) != p.charAt(k)) k = pi[k - 1];
+                if (p.charAt(i) == p.charAt(k)) k++;
+                pi[i] = k;
+            }
+            return pi;
+        }
+
+        static List<Integer> kmpSearch(String text, String pat) {
+            List<Integer> res = new ArrayList<>();
+            if (pat.isEmpty()) return res;
+            int[] pi = prefixFunction(pat);
+            for (int i = 0, k = 0; i < text.length(); i++) {
+                while (k > 0 && text.charAt(i) != pat.charAt(k)) k = pi[k - 1];
+                if (text.charAt(i) == pat.charAt(k)) k++;
+                if (k == pat.length()) { res.add(i - k + 1); k = pi[k - 1]; }
+            }
+            return res;
+        }
+
+        // ---- Suffix array (sorting suffixes) ----
+        static Integer[] suffixArray(String s) {
+            int n = s.length();
+            Integer[] sa = new Integer[n];
+            for (int i = 0; i < n; i++) sa[i] = i;
+            Arrays.sort(sa, (a, b) -> {
+                int i = a, j = b;
+                while (i < n && j < n) {
+                    if (s.charAt(i) != s.charAt(j)) return Character.compare(s.charAt(i), s.charAt(j));
+                    i++; j++;
+                }
+                return Integer.compare(n - a, n - b);
+            });
+            return sa;
+        }
+
+        // ---- LCP array by Kasai's algorithm, O(n): lcp[i] = LCP(sa[i-1], sa[i]) ----
+        static int[] lcpArray(String s, Integer[] sa) {
+            int n = s.length();
+            int[] rank = new int[n], lcp = new int[n];
+            for (int i = 0; i < n; i++) rank[sa[i]] = i;
+            for (int i = 0, h = 0; i < n; i++) {
+                if (rank[i] > 0) {
+                    int j = sa[rank[i] - 1];
+                    while (i + h < n && j + h < n && s.charAt(i + h) == s.charAt(j + h)) h++;
+                    lcp[rank[i]] = h;
+                    if (h > 0) h--;
+                } else h = 0;
+            }
+            return lcp;
+        }
+    }
+
+    static void keywordSearch(DAG g, String keyword) {
+        String pat = keyword.toLowerCase();
+        int found = 0;
+        for (Task t : g.tasks.values()) {
+            List<Integer> pos = StringAlgos.kmpSearch(t.name.toLowerCase(), pat);
+            if (!pos.isEmpty()) {
+                found++;
+                System.out.printf("  %-4s %-22s match at index %s%n", t.id, t.name, pos);
+            }
+        }
+        if (found == 0) System.out.println("  No task name contains \"" + keyword + "\".");
+    }
+
+    // Finds pairs of tasks whose names share a common substring of length >= minLen
+    static void similarNames(DAG g, int minLen) {
+        List<Task> list = new ArrayList<>(g.tasks.values());
+        StringBuilder sb = new StringBuilder();
+        List<Integer> ownerList = new ArrayList<>();
+        for (int t = 0; t < list.size(); t++) {
+            String nm = list.get(t).name.toLowerCase();
+            for (int i = 0; i < nm.length(); i++) { sb.append(nm.charAt(i)); ownerList.add(t); }
+            sb.append((char) (0x100 + t));            // unique separator so matches never cross tasks
+            ownerList.add(-1);
+        }
+        String s = sb.toString();
+        int[] owner = ownerList.stream().mapToInt(Integer::intValue).toArray();
+
+        Integer[] sa = StringAlgos.suffixArray(s);
+        int[] lcp = StringAlgos.lcpArray(s, sa);
+
+        Map<String, int[]> best = new TreeMap<>();    // "a,b" -> {length, start}
+        for (int i = 0; i < sa.length; i++) {
+            if (owner[sa[i]] < 0) continue;
+            int m = Integer.MAX_VALUE;
+            for (int j = i + 1; j < sa.length; j++) {
+                m = Math.min(m, lcp[j]);
+                if (m < minLen) break;                 // range-minimum of LCP = common prefix length
+                if (owner[sa[j]] < 0 || owner[sa[j]] == owner[sa[i]]) continue;
+                int a = Math.min(owner[sa[i]], owner[sa[j]]), b = Math.max(owner[sa[i]], owner[sa[j]]);
+                String key = a + "," + b;
+                if (!best.containsKey(key) || best.get(key)[0] < m) best.put(key, new int[]{m, sa[i]});
+            }
+        }
+        if (best.isEmpty()) { System.out.println("  No similar task names found (min shared length " + minLen + ")."); return; }
+        for (Map.Entry<String, int[]> e : best.entrySet()) {
+            String[] ab = e.getKey().split(",");
+            Task x = list.get(Integer.parseInt(ab[0])), y = list.get(Integer.parseInt(ab[1]));
+            String shared = s.substring(e.getValue()[1], e.getValue()[1] + e.getValue()[0]);
+            System.out.printf("  %s (%s)  ~  %s (%s)   shared: \"%s\" (%d chars)%n", x.id, x.name, y.id, y.name, shared, e.getValue()[0]);
+        }
+        System.out.println("  -> Please check that these are not duplicate tasks.");
+    }
+
+    // =====================================================================
+    //  CO3 / CO1 : Resource planning (single worker, NP-hard in general)
+    // =====================================================================
+    static final int EXACT_LIMIT = 20;
+
+    static void singleWorkerPlan(DAG g, List<String> order) {
+        int n = order.size();
+        System.out.println("  Problem: ONE worker does all tasks, respecting dependencies.");
+        System.out.println("  Goal   : minimise the sum of task completion times (tasks finish as early as possible).");
+        if (n <= EXACT_LIMIT) {
+            System.out.println("  Strategy selected: exact BITMASK DP  (n = " + n + " <= " + EXACT_LIMIT + ", O(2^n * n))");
+            bitmaskPlan(g, order);
+        } else {
+            System.out.println("  Strategy selected: GREEDY heuristic (n = " + n + " > " + EXACT_LIMIT
+                    + "; 2^n states is too many, and the problem is NP-hard in general)");
+            greedyPlan(g);
+        }
+    }
+
+    // dp[mask] = min sum of completion times if exactly the tasks in 'mask' have been done first
+    static void bitmaskPlan(DAG g, List<String> order) {
+        int n = order.size();
+        Map<String, Integer> idx = new HashMap<>();
+        for (int i = 0; i < n; i++) idx.put(order.get(i), i);
+        int[] dur = new int[n], predMask = new int[n];
+        for (int i = 0; i < n; i++) {
+            Task t = g.tasks.get(order.get(i));
+            dur[i] = t.duration;
+            for (String p : t.preds) predMask[i] |= 1 << idx.get(p);
+        }
+        int full = (1 << n) - 1;
+        int[] sum = new int[full + 1];
+        long[] dp = new long[full + 1], ways = new long[full + 1];
+        int[] parent = new int[full + 1];
+        Arrays.fill(dp, Long.MAX_VALUE);
+        dp[0] = 0; ways[0] = 1;
+        for (int mask = 1; mask <= full; mask++) { int low = Integer.numberOfTrailingZeros(mask); sum[mask] = sum[mask & (mask - 1)] + dur[low]; }
+
+        for (int mask = 0; mask <= full; mask++) {
+            if (dp[mask] == Long.MAX_VALUE) continue;
+            for (int i = 0; i < n; i++) {
+                if ((mask >> i & 1) != 0 || (predMask[i] & mask) != predMask[i]) continue;   // not ready
+                int nm = mask | (1 << i);
+                long cost = dp[mask] + sum[nm];                    // task i finishes at sum[nm]
+                if (cost < dp[nm]) { dp[nm] = cost; parent[nm] = i; }
+                ways[nm] += ways[mask];                            // counting valid orders
+            }
+        }
+        Deque<String> seq = new ArrayDeque<>();
+        for (int m = full; m != 0; m ^= 1 << parent[m]) seq.addFirst(order.get(parent[m]));
+        System.out.println("  Best order            : " + String.join(" -> ", seq));
+        System.out.println("  Sum of finish times   : " + dp[full] + "   (average " + String.format("%.2f", dp[full] / (double) n) + " days)");
+        System.out.println("  Total time (1 worker) : " + sum[full] + " days");
+        System.out.println("  Valid execution orders: " + ways[full] + "  (all topological orders, counted by DP on subsets)");
+    }
+
+    // Heuristic: among ready tasks always do the shortest first
+    static void greedyPlan(DAG g) {
+        Map<String, Integer> deg = new HashMap<>(g.indegree);
+        PriorityQueue<Task> ready = new PriorityQueue<>((a, b) -> a.duration != b.duration ? a.duration - b.duration : a.id.compareTo(b.id));
+        for (Task t : g.tasks.values()) if (deg.get(t.id) == 0) ready.add(t);
+        List<String> seq = new ArrayList<>();
+        long time = 0, sumFinish = 0;
+        while (!ready.isEmpty()) {
+            Task t = ready.poll();
+            seq.add(t.id); time += t.duration; sumFinish += time;
+            for (String v : g.adj.get(t.id)) { deg.put(v, deg.get(v) - 1); if (deg.get(v) == 0) ready.add(g.tasks.get(v)); }
+        }
+        System.out.println("  Order (heuristic)     : " + String.join(" -> ", seq));
+        System.out.println("  Sum of finish times   : " + sumFinish + "  (not guaranteed optimal)");
+        System.out.println("  Total time (1 worker) : " + time + " days");
+    }
+
+    // ---- DP on subsets: split tasks into two teams with balanced workload (subset-sum) ----
+    static void twoTeamSplit(DAG g) {
+        List<Task> list = new ArrayList<>(g.tasks.values());
+        int n = list.size(), total = 0;
+        for (Task t : list) total += t.duration;
+        int half = total / 2;
+        boolean[][] can = new boolean[n + 1][half + 1];
+        can[0][0] = true;
+        for (int i = 1; i <= n; i++) {
+            int d = list.get(i - 1).duration;
+            for (int s = 0; s <= half; s++) can[i][s] = can[i - 1][s] || (s >= d && can[i - 1][s - d]);
+        }
+        int best = half;
+        while (!can[n][best]) best--;
+        StringBuilder a = new StringBuilder(), b = new StringBuilder();
+        int s = best;
+        boolean[] inA = new boolean[n];
+        for (int i = n; i >= 1; i--) {
+            if (can[i - 1][s]) continue;
+            inA[i - 1] = true; s -= list.get(i - 1).duration;
+        }
+        for (int i = 0; i < n; i++) (inA[i] ? a : b).append(list.get(i).id).append(' ');
+        System.out.println("  Team 1: " + a.toString().trim() + "   (" + best + " days of work)");
+        System.out.println("  Team 2: " + b.toString().trim() + "   (" + (total - best) + " days of work)");
+        System.out.println("  Most balanced split: busiest team has " + Math.max(best, total - best) + " days of work.");
+        System.out.println("  (Balances workload only; dependencies may still force waiting between teams.)");
+    }
+
+    // =====================================================================
+    //  CO1 : Problem-class evaluation and strategy selection
+    // =====================================================================
+    static void strategyReport(int n) {
+        System.out.println("  Sub-problem                        | Problem class                   | Strategy chosen");
+        System.out.println("  -----------------------------------+---------------------------------+---------------------------------");
+        System.out.println("  Valid order of tasks               | DAG ordering, polynomial        | Topological sort, O(V+E)");
+        System.out.println("  Min. project time, unlimited staff | Longest path in DAG, polynomial | CPM = DP over topological order");
+        System.out.println("  Circular dependency check          | Cycle detection in graph        | DFS colouring, O(V+E)");
+        System.out.println("  Search tasks by keyword            | Substring search                | KMP, O(n+m) - no rescanning");
+        System.out.println("  Similar/duplicate task names       | Repeated substrings             | Suffix array + LCP array");
+        System.out.println("  One worker, min sum of finish time | NP-hard scheduling in general   | " + (n <= EXACT_LIMIT
+                ? "Bitmask DP (n=" + n + " is small enough)" : "Greedy heuristic (n=" + n + " too large for 2^n)"));
+        System.out.println("  Split workload between 2 teams     | Partition (NP-hard, weakly)     | Subset-sum DP, O(n * total/2)");
+        System.out.println("  Assign tasks to skilled workers    | Bipartite matching = max-flow  | Edmonds-Karp, O(V*E^2); min-cut check");
+        System.out.println("  Finish fast with m workers         | NP-hard (contains PARTITION)    | Graham list scheduling, (2-1/m)-approx");
+        System.out.println("  Median task duration               | Selection                       | Las Vegas randomised quick-select");
+        System.out.println("  Uncertain durations                | Probabilistic estimation        | Monte Carlo simulation");
+        System.out.println("  Totals / running sums              | Parallel primitives             | Reduce + prefix sum, span O(log n)");
+    }
+
+    // =====================================================================
+    //  CO4 : Network flow (Edmonds-Karp) - assign tasks to workers
+    // =====================================================================
+    static class Worker {
+        String name; int cap; Set<String> can = new LinkedHashSet<>();
+        Worker(String n, int c) { name = n; cap = c; }
+    }
+
+    static int edmondsKarp(int[][] c, int s, int t) {          // BFS augmenting paths, O(V * E^2)
+        int n = c.length, total = 0;
+        while (true) {
+            int[] par = new int[n]; Arrays.fill(par, -1); par[s] = s;
+            Deque<Integer> q = new ArrayDeque<>(); q.add(s);
+            while (!q.isEmpty() && par[t] < 0) {
+                int u = q.poll();
+                for (int v = 0; v < n; v++) if (par[v] < 0 && c[u][v] > 0) { par[v] = u; q.add(v); }
+            }
+            if (par[t] < 0) return total;
+            int f = Integer.MAX_VALUE;
+            for (int v = t; v != s; v = par[v]) f = Math.min(f, c[par[v]][v]);
+            for (int v = t; v != s; v = par[v]) { c[par[v]][v] -= f; c[v][par[v]] += f; }
+            total += f;
+        }
+    }
+
+    static void assignWorkers(DAG g, List<Worker> ws) {
+        List<Task> ts = new ArrayList<>(g.tasks.values());
+        int W = ws.size(), T = ts.size(), n = W + T + 2, s = n - 2, t = n - 1;
+        int[][] c = new int[n][n];
+        for (int w = 0; w < W; w++) {
+            c[s][w] = ws.get(w).cap;
+            for (int i = 0; i < T; i++) if (ws.get(w).can.contains(ts.get(i).id)) c[w][W + i] = 1;
+        }
+        for (int i = 0; i < T; i++) c[W + i][t] = 1;
+        int[][] orig = new int[n][];
+        for (int i = 0; i < n; i++) orig[i] = c[i].clone();
+        int flow = edmondsKarp(c, s, t);
+
+        System.out.println("  Network: source -> worker (capacity = max tasks) -> task (1 if skilled) -> sink");
+        System.out.println("  Max flow = " + flow + " of " + T + " tasks assigned");
+        for (int w = 0; w < W; w++) {
+            List<String> mine = new ArrayList<>();
+            for (int i = 0; i < T; i++) if (c[W + i][w] > 0) mine.add(ts.get(i).id);
+            System.out.println("  " + ws.get(w).name + " (cap " + ws.get(w).cap + "): " + (mine.isEmpty() ? "-" : String.join(", ", mine)));
+        }
+        List<String> left = new ArrayList<>();
+        for (int i = 0; i < T; i++) if (c[W + i][t] > 0) left.add(ts.get(i).id);
+        System.out.println("  Unassigned tasks: " + (left.isEmpty() ? "none" : String.join(", ", left)));
+
+        boolean[] inS = new boolean[n];                         // min cut = residual-reachable side
+        Deque<Integer> q = new ArrayDeque<>(); q.add(s); inS[s] = true;
+        while (!q.isEmpty()) { int u = q.poll(); for (int v = 0; v < n; v++) if (!inS[v] && c[u][v] > 0) { inS[v] = true; q.add(v); } }
+        int cut = 0;
+        for (int u = 0; u < n; u++) for (int v = 0; v < n; v++) if (inS[u] && !inS[v]) cut += orig[u][v];
+        System.out.println("  Min cut capacity = " + cut + "  (max-flow = min-cut: " + (cut == flow ? "verified" : "MISMATCH") + ")");
+    }
+
+    static List<Worker> sampleWorkers() {
+        List<Worker> ws = new ArrayList<>();
+        String[][] d = {{"Asha", "2", "A,B,C"}, {"Ravi", "1", "B,D"}, {"Meera", "1", "D,E"}};
+        for (String[] r : d) { Worker w = new Worker(r[0], Integer.parseInt(r[1])); w.can.addAll(Arrays.asList(r[2].split(","))); ws.add(w); }
+        return ws;
+    }
+
+    static List<Worker> readWorkers(Scanner sc) {
+        List<Worker> ws = new ArrayList<>();
+        int n = readInt(sc, "Number of workers: ", 1);
+        for (int i = 1; i <= n; i++) {
+            System.out.print("Worker " + i + " name: "); String nm = sc.nextLine().trim();
+            Worker w = new Worker(nm, readInt(sc, "  Max tasks: ", 0));
+            System.out.print("  Task IDs this worker can do (comma separated): ");
+            for (String x : sc.nextLine().trim().toUpperCase().split("\\s*,\\s*")) if (!x.isEmpty()) w.can.add(x);
+            ws.add(w);
+        }
+        return ws;
+    }
+
+    // =====================================================================
+    //  CO5 : NP-hard scheduling -> approximation (Graham list scheduling)
+    // =====================================================================
+    static void multiWorkerSchedule(DAG g, int m, int cpmTotal) {
+        int sum = 0; for (Task t : g.tasks.values()) sum += t.duration;
+        System.out.println("  Problem: schedule tasks on " + m + " identical workers, minimise finish time (makespan).");
+        System.out.println("  Class  : NP-hard (2 workers, no dependencies = PARTITION), so exact answers are too costly.");
+        System.out.println("  Method : Graham list scheduling (longest ready task first), a polynomial (2 - 1/" + m + ")-approximation.");
+        Map<String, Integer> fin = new HashMap<>();
+        int[] free = new int[m];
+        List<Task> rem = new ArrayList<>(g.tasks.values());
+        int time = 0;
+        while (!rem.isEmpty()) {
+            List<Task> ready = new ArrayList<>();
+            for (Task t : rem) {
+                boolean ok = true;
+                for (String p : t.preds) { Integer f = fin.get(p); if (f == null || f > time) { ok = false; break; } }
+                if (ok) ready.add(t);
+            }
+            ready.sort((a, b) -> b.duration != a.duration ? b.duration - a.duration : a.id.compareTo(b.id));
+            for (Task t : ready) {
+                int w = -1;
+                for (int k = 0; k < m; k++) if (free[k] <= time) { w = k; break; }
+                if (w < 0) break;
+                fin.put(t.id, time + t.duration); free[w] = time + t.duration; rem.remove(t);
+                System.out.printf("    Worker %d: %-3s day %d -> %d%n", w + 1, t.id, time, time + t.duration);
+            }
+            int next = Integer.MAX_VALUE;
+            for (int f : fin.values()) if (f > time) next = Math.min(next, f);
+            if (next != Integer.MAX_VALUE) time = next;
+        }
+        int makespan = 0; for (int f : fin.values()) makespan = Math.max(makespan, f);
+        int lb = Math.max(cpmTotal, (sum + m - 1) / m);
+        System.out.println("  Makespan with " + m + " workers : " + makespan + " days");
+        System.out.println("  Lower bound on optimum      : " + lb + " days = max(critical path " + cpmTotal + ", ceil(work " + sum + " / " + m + "))");
+        System.out.printf("  Ratio to lower bound        : %.2f (guarantee <= %.2f)%n", makespan / (double) lb, 2.0 - 1.0 / m);
+    }
+
+    // =====================================================================
+    //  CO6 : Randomised + parallel algorithms
+    // =====================================================================
+    static int quickSelect(int[] a, int k, Random rnd) {          // Las Vegas: always correct, random running time
+        int lo = 0, hi = a.length - 1;
+        while (true) {
+            if (lo == hi) return a[lo];
+            int p = a[lo + rnd.nextInt(hi - lo + 1)], i = lo, j = hi;
+            while (i <= j) {
+                while (a[i] < p) i++;
+                while (a[j] > p) j--;
+                if (i <= j) { int tmp = a[i]; a[i] = a[j]; a[j] = tmp; i++; j--; }
+            }
+            if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+        }
+    }
+
+    static void randomisedAndParallel(DAG g, List<String> order) {
+        int n = order.size();
+        int[] dur = new int[n];
+        for (int i = 0; i < n; i++) dur[i] = g.tasks.get(order.get(i)).duration;
+
+        System.out.println("  [Las Vegas] randomised quick-select, expected O(n):");
+        System.out.println("    Median task duration = " + quickSelect(dur.clone(), (n - 1) / 2, new Random(7)) + " days (always correct)");
+
+        System.out.println("  [Monte Carlo] 10000 runs, each duration grows by 0% to 50% at random (seed 42):");
+        Random rnd = new Random(42);
+        int trials = 10000, hits = 0, base = 0;
+        double[] ef = new double[n]; int[] bestPred = new int[n], crit = new int[n];
+        Map<String, Integer> pos = new HashMap<>();
+        for (int i = 0; i < n; i++) { pos.put(order.get(i), i); base = Math.max(base, g.tasks.get(order.get(i)).ef); }
+        int deadline = base + 2; double sumEnd = 0;
+        for (int r = 0; r < trials; r++) {
+            int end = 0;
+            for (int i = 0; i < n; i++) {
+                Task t = g.tasks.get(order.get(i));
+                double es = 0; bestPred[i] = -1;
+                for (String p : t.preds) { int pi = pos.get(p); if (ef[pi] > es) { es = ef[pi]; bestPred[i] = pi; } }
+                ef[i] = es + t.duration * (1 + 0.5 * rnd.nextDouble());
+                if (ef[i] > ef[end]) end = i;
+            }
+            sumEnd += ef[end];
+            if (ef[end] <= deadline) hits++;
+            for (int v = end; v >= 0; v = bestPred[v]) crit[v]++;
+        }
+        System.out.printf("    Expected project time = %.2f days (plain CPM: %d)%n", sumEnd / trials, base);
+        System.out.printf("    P(finish within %d days) = %.1f%%%n", deadline, 100.0 * hits / trials);
+        StringBuilder sb = new StringBuilder("    Criticality index: ");
+        for (int i = 0; i < n; i++) sb.append(order.get(i)).append(' ').append(Math.round(100.0 * crit[i] / trials)).append("%  ");
+        System.out.println(sb.toString().trim());
+
+        System.out.println("  [Parallel reduce + prefix sum] on task durations in topological order:");
+        int rounds = 0; for (int s = 1; s < n; s *= 2) rounds++;
+        int[] scan = dur.clone();
+        for (int d = 1; d < n; d *= 2) {                         // Hillis-Steele scan: updates inside a round are independent
+            int[] nxt = scan.clone();
+            for (int i = d; i < n; i++) nxt[i] = scan[i] + scan[i - d];
+            scan = nxt;
+        }
+        int[] check = dur.clone(); Arrays.parallelPrefix(check, Integer::sum);
+        System.out.println("    Prefix sums (one-worker finish times): " + Arrays.toString(scan)
+                + (Arrays.equals(scan, check) ? "  [matches Arrays.parallelPrefix]" : "  [MISMATCH]"));
+        System.out.println("    Total work = " + scan[n - 1] + " days | reduce: " + (n - 1) + " additions, span " + rounds + " rounds");
+        System.out.printf("    Work-span: work = O(n), span = O(log n), parallelism ~ n/log n = %.1f%n", n / (double) Math.max(1, rounds));
+    }
+
+    static void runAll(DAG g, List<String> order, int total, List<Worker> ws, Scanner sc) {
+        System.out.println("\n[CO2] KMP keyword search for \"database\":"); keywordSearch(g, "database");
+        System.out.println("\n[CO2] Suffix array + LCP - similar task names:"); similarNames(g, 5);
+        System.out.println("\n[CO1/CO3] Single worker plan:"); singleWorkerPlan(g, order);
+        System.out.println("\n[CO3] Two-team split:"); twoTeamSplit(g);
+        System.out.println("\n[CO4] Worker assignment by max-flow:"); assignWorkers(g, ws);
+        System.out.println("\n[CO5] Two workers, approximation:"); multiWorkerSchedule(g, 2, total);
+        System.out.println("\n[CO6] Randomised and parallel:"); randomisedAndParallel(g, order);
+        System.out.println("\n[CO1] Algorithm selection report:"); strategyReport(order.size());
+    }
+
+    // =====================================================================
+    //  Input handling and main
+    // =====================================================================
+    static DAG readInput(Scanner sc) {
+        DAG g = new DAG();
+        int n = readInt(sc, "Number of tasks: ", 1);
+        for (int i = 1; i <= n; i++) {
+            System.out.println("--- Task " + i + " ---");
+            String id;
+            while (true) {
+                System.out.print("ID (e.g. A): ");
+                id = sc.nextLine().trim().toUpperCase();
+                if (id.isEmpty()) System.out.println("ID cannot be empty.");
+                else if (g.tasks.containsKey(id)) System.out.println("Duplicate ID, try again.");
+                else break;
+            }
+            System.out.print("Name: ");
+            String name = sc.nextLine().trim();
+            int dur = readInt(sc, "Duration (days): ", 0);
+            g.addTask(new Task(id, name, dur));
+            System.out.print("Depends on (comma separated IDs, or Enter for none): ");
+            String line = sc.nextLine().trim().toUpperCase();
+            if (!line.isEmpty()) for (String p : line.split("\\s*,\\s*")) g.tasks.get(id).preds.add(p);
+        }
+        return g;
+    }
+
+    static int readInt(Scanner sc, String prompt, int min) {
+        while (true) {
+            System.out.print(prompt);
+            try { int v = Integer.parseInt(sc.nextLine().trim()); if (v >= min) return v; }
+            catch (NumberFormatException ignored) { }
+            System.out.println("Please enter a whole number >= " + min + ".");
+        }
+    }
+
+    static DAG sampleProject() {
+        DAG g = new DAG();
+        String[][] d = {
+            {"A", "Requirements",    "2", ""},
+            {"B", "Database Design", "3", "A"},
+            {"C", "Database Setup",  "2", "A"},
+            {"D", "Development",     "4", "B,C"},
+            {"E", "Testing",         "2", "D"}};
+        for (String[] r : d) {
+            g.addTask(new Task(r[0], r[1], Integer.parseInt(r[2])));
+            if (!r[3].isEmpty()) g.tasks.get(r[0]).preds.addAll(Arrays.asList(r[3].split(",")));
+        }
+        return g;
+    }
+
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        System.out.println("=== PROJECT SCHEDULING SYSTEM (DAG + Topological Sort + CPM) ===");
+        System.out.println("1. Enter my own project");
+        System.out.println("2. Run the sample project (A-E)");
+        int choice = readInt(sc, "Choice: ", 1);
+        DAG g = (choice == 2) ? sampleProject() : readInput(sc);
+        List<Worker> workers = (choice == 2) ? sampleWorkers() : null;
+
+        for (Task t : g.tasks.values())
+            for (String p : t.preds) {
+                if (!g.tasks.containsKey(p)) { System.out.println("Error: task " + t.id + " depends on unknown task '" + p + "'."); return; }
+                if (p.equals(t.id)) { System.out.println("Error: task " + t.id + " cannot depend on itself."); return; }
+                g.addEdge(p, t.id);
+            }
+
+        List<String> cycle = g.findCycle();
+        if (cycle != null) {
+            System.out.println("Error: circular dependency detected: " + String.join(" -> ", cycle));
+            System.out.println("A valid schedule is not possible. Please fix the dependencies.");
+            return;
+        }
+
+        List<String> order = g.topologicalSort();
+        int total = runCPM(g, order);
+        printSchedule(g, order, total);
+
+        while (true) {
+            System.out.println("\n----- MORE TOOLS -----");
+            System.out.println("1. Show schedule again");
+            System.out.println("2. Search tasks by keyword            (KMP)");
+            System.out.println("3. Find similar task names            (Suffix array + LCP)");
+            System.out.println("4. Best order for a single worker     (Bitmask DP / greedy)");
+            System.out.println("5. Split work between 2 teams         (Subset DP)");
+            System.out.println("6. Algorithm selection report         (problem classes)");
+            System.out.println("7. Assign tasks to workers            (Max-flow, Edmonds-Karp)");
+            System.out.println("8. Schedule on m workers              (NP-hard -> approximation)");
+            System.out.println("9. Randomised + parallel analysis     (Monte Carlo, Las Vegas, prefix sum)");
+            System.out.println("10. Run everything (full demo report)");
+            System.out.println("0. Exit");
+            int c = readInt(sc, "Choice: ", 0);
+            switch (c) {
+                case 0: System.out.println("Goodbye!"); return;
+                case 1: printSchedule(g, order, total); break;
+                case 2: System.out.print("Keyword: "); keywordSearch(g, sc.nextLine().trim()); break;
+                case 3: similarNames(g, 5); break;
+                case 4: singleWorkerPlan(g, order); break;
+                case 5: twoTeamSplit(g); break;
+                case 6: strategyReport(order.size()); break;
+                case 7: if (workers == null) workers = readWorkers(sc); assignWorkers(g, workers); break;
+                case 8: multiWorkerSchedule(g, readInt(sc, "Number of workers: ", 1), total); break;
+                case 9: randomisedAndParallel(g, order); break;
+                case 10: if (workers == null) workers = readWorkers(sc); runAll(g, order, total, workers, sc); break;
+                default: System.out.println("Invalid choice.");
+            }
+        }
+    }
+}
